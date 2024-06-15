@@ -93,7 +93,7 @@ void GamepadHandler::run()
         m_mutex.unlock();
 
         SDL_Event event;
-        while (SDL_PollEvent(&event)) {
+        while (SDL_WaitEvent(&event)) {
             switch (event.type) {
             case SDL_CONTROLLERDEVICEADDED:
                 emit gamepadsChanged();
