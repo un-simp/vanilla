@@ -17,26 +17,50 @@ enum RecordingStream {
     AUDIO_STREAM_INDEX
 };
 
+static const int GAMEPAD_WIDTH = 854;
+static const int GAMEPAD_HEIGHT = 480;
+static const AVPixelFormat GAMEPAD_FORMAT = AV_PIX_FMT_YUV420P;
+
+int openDecoder(AVCodecContext **ctx, const AVCodec *codec)
+{
+    (*ctx) = avcodec_alloc_context3(codec);
+    (*ctx)->width = GAMEPAD_WIDTH;
+    (*ctx)->height = GAMEPAD_HEIGHT;
+    (*ctx)->pix_fmt = GAMEPAD_FORMAT;
+    int r = avcodec_open2((*ctx), codec, NULL);
+    if (r < 0) {
+        avcodec_free_context(ctx);
+    }
+    return r;
+}
+
 VideoDecoder::VideoDecoder(QObject *parent) : QObject(parent)
 {
     m_recordingCtx = nullptr;
     
+    // Try to use v4l2m2m hardware decoder (Raspberry Pi)
+    if (openDecoder(&m_codecCtx, avcodec_find_decoder_by_name("h264_v4l2m2m")) < 0) {
+        fprintf(stderr, "Failed to open v4l2m2m decoder\n");
+
+        // Fallback to software decoder
+        if (openDecoder(&m_codecCtx, avcodec_find_decoder(AV_CODEC_ID_H264)) < 0) {
+            fprintf(stderr, "Failed to open software decoder\n");
+            return;
+        }
+    }
+    
     m_packet = av_packet_alloc();
     m_frame = av_frame_alloc();
-    
-    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
-    m_codecCtx = avcodec_alloc_context3(codec);
-    avcodec_open2(m_codecCtx, codec, NULL);
 
     m_filterGraph = avfilter_graph_alloc();
 
     char args[512];
-    snprintf(args, sizeof(args), "video_size=%dx%d:pix_fmt=%d:time_base=30/1:pixel_aspect=1/1", 854, 480, AV_PIX_FMT_YUV420P);
+    snprintf(args, sizeof(args), "video_size=%dx%d:pix_fmt=%d:time_base=30/1:pixel_aspect=1/1", GAMEPAD_WIDTH, GAMEPAD_HEIGHT, GAMEPAD_FORMAT);
     avfilter_graph_create_filter(&m_buffersrcCtx, avfilter_get_by_name("buffer"), "in", args, NULL, m_filterGraph);
 
     avfilter_graph_create_filter(&m_buffersinkCtx, avfilter_get_by_name("buffersink"), "out", NULL, NULL, m_filterGraph);
 
-    enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_RGB24, AV_PIX_FMT_NONE};
+    enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_RGBA, AV_PIX_FMT_NONE};
     av_opt_set_int_list(m_buffersinkCtx, "pix_fmts", pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN);
     
     avfilter_link(m_buffersrcCtx, 0, m_buffersinkCtx, 0);
@@ -108,7 +132,7 @@ void VideoDecoder::sendPacket(const QByteArray &data)
         // Decoder wants another packet before it can output a frame. Silently exit.
     } else if (ret < 0) {
         fprintf(stderr, "Failed to receive frame from decoder: %i\n", ret);
-    } else {
+    } else if (0) {
         ret = av_buffersrc_add_frame_flags(m_buffersrcCtx, m_frame, AV_BUFFERSRC_FLAG_KEEP_REF);
         av_frame_unref(m_frame);
         if (ret < 0) {
@@ -124,8 +148,15 @@ void VideoDecoder::sendPacket(const QByteArray &data)
             return;
         }
 
-        QImage image(filtered->data[0], filtered->width, filtered->height, filtered->linesize[0], QImage::Format_RGB888, cleanupFrame, filtered);
+        QImage image(filtered->data[0], filtered->width, filtered->height, filtered->linesize[0], QImage::Format_RGBA8888, cleanupFrame, filtered);
         emit frameReady(image);
+    } else {
+        QImage image(GAMEPAD_WIDTH, GAMEPAD_HEIGHT, QImage::Format_Grayscale8);
+        for (int y = 0; y < GAMEPAD_HEIGHT; y++) {
+            memcpy(image.scanLine(y), m_frame->data[0] + m_frame->linesize[0] * y, qMin(image.bytesPerLine(), m_frame->linesize[0]));
+        }
+        emit frameReady(image);
+        av_frame_unref(m_frame);
     }
 }
 
@@ -186,10 +217,9 @@ void VideoDecoder::startRecording()
 
     m_videoStream->id = VIDEO_STREAM_INDEX;
     m_videoStream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
-    m_videoStream->codecpar->width = 854;
-    m_videoStream->codecpar->height = 480;
-    m_videoStream->codecpar->format = AV_PIX_FMT_YUV420P;
-    m_videoStream->time_base = {1, 60};
+    m_videoStream->codecpar->width = GAMEPAD_WIDTH;
+    m_videoStream->codecpar->height = GAMEPAD_HEIGHT;
+    m_videoStream->codecpar->format = GAMEPAD_FORMAT;
     m_videoStream->codecpar->codec_id = AV_CODEC_ID_H264;
 
     size_t sps_pps_size;
@@ -213,7 +243,6 @@ void VideoDecoder::startRecording()
     m_audioStream->codecpar->channel_layout = AV_CH_LAYOUT_STEREO;
 #endif
     m_audioStream->codecpar->format = AV_SAMPLE_FMT_S16;
-    m_audioStream->time_base = {1, 48000};
     m_audioStream->codecpar->codec_id = AV_CODEC_ID_PCM_S16LE;
 
     r = avio_open2(&m_recordingCtx->pb, filenameUtf8.constData(), AVIO_FLAG_WRITE, nullptr, nullptr);
