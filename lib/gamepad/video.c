@@ -66,7 +66,7 @@ void handle_video_packet(vanilla_event_handler_t event_handler, void *context, u
     for (int byte = 0; byte < vp->payload_size; ++byte)
         vp->payload[byte] = (unsigned char) reverse_bits(vp->payload[byte], 8);
     
-    // Check is_idr_packet (what the fuck is 'idr'?)
+    // Check if packet is IDR (instant decoder refresh)
     int is_idr = 0;
     for (int i = 0; i < sizeof(vp->extended_header); i++) {
         if (vp->extended_header[i] == 0x80) {
@@ -75,36 +75,18 @@ void handle_video_packet(vanilla_event_handler_t event_handler, void *context, u
         }
     }
 
-    // Check seq ID
-    static int seq_id_expected = -1;
-    int seq_matched = 1;
-    if (seq_id_expected == -1) {
-        seq_id_expected = vp->seq_id;
-    } else if (seq_id_expected != vp->seq_id) {
-        seq_matched = 0;
-    }
-    seq_id_expected = (vp->seq_id + 1) & 0x3ff;  // 10 bit number
-    static int is_streaming = 0;
-    if (!seq_matched) {
-        is_streaming = 0;
-    }
-
-    // Check if this is the beginning of the packet
-    static char video_packet[100000];
-    static size_t video_packet_size = 0;
-
-    if (vp->frame_begin) {
-        video_packet_size = 0;
-        if (!is_streaming) {
-            if (is_idr) {
-                is_streaming = 1;
-            } else {
-                send_idr_request_to_console(socket_msg);
-                return;
-            }
+    static int waiting_for_idr = 1;
+    if (waiting_for_idr) {
+        if (is_idr) {
+            print_info("Received IDR, proceeding...");
+            waiting_for_idr = 0;
+        } else {
+            // Still waiting for IDR...
+            return;
         }
     }
 
+    // Send IDR if requested (TODO: should put this outside "handle" function)
     pthread_mutex_lock(&video_mutex);
     if (idr_is_queued) {
         send_idr_request_to_console(socket_msg);
@@ -112,54 +94,79 @@ void handle_video_packet(vanilla_event_handler_t event_handler, void *context, u
     }
     pthread_mutex_unlock(&video_mutex);
 
+    // Check sequence ID
+    static int seq_id_expected = -1;
+    if (seq_id_expected == -1) {
+        seq_id_expected = vp->seq_id;
+    } else if (seq_id_expected != vp->seq_id) {
+        print_info("Received invalid seq_id (got %u, expected %u). Sending IDR.", vp->seq_id, seq_id_expected);
+        seq_id_expected = -1;
+        waiting_for_idr = 1;
+        send_idr_request_to_console(socket_msg);
+        return;
+    }
+
+    // Set next seq ID (10-bit number)
+    seq_id_expected = (vp->seq_id + 1) & 0x3ff;
+
+    // Check if this is the beginning of the packet
+    static char video_packet[100000];
+    static size_t video_packet_size = 0;
+
+    if (vp->frame_begin) {
+        print_info("Received frame begin");
+        video_packet_size = 0;
+    }
+
     memcpy(video_packet + video_packet_size, vp->payload, vp->payload_size);
     video_packet_size += vp->payload_size;
 
+    if (!vp->frame_begin && !vp->frame_end) {
+        print_info("Received frame middle");
+    }
+
     if (vp->frame_end) {
-        if (is_streaming) {
-            // Encapsulate packet data into NAL unit
-            static int frame_decode_num = 0;
-            size_t nals_sz = video_packet_size * 2;
-            uint8_t *nals = malloc(nals_sz);
-            uint8_t *nals_current = nals;
-            int slice_header = is_idr ? 0x25b804ff : (0x21e003ff | ((frame_decode_num & 0xff) << 13));
-            frame_decode_num++;
+        print_info("Received frame end");
+        // Encapsulate packet data into NAL unit
+        static int frame_decode_num = 0;
+        size_t nals_sz = video_packet_size * 2;
+        uint8_t *nals = malloc(nals_sz);
+        uint8_t *nals_current = nals;
+        int slice_header = is_idr ? 0x25b804ff : (0x21e003ff | ((frame_decode_num & 0xff) << 13));
+        frame_decode_num++;
 
-            if (is_idr) {
-                memcpy(nals_current, sps_pps_params, sizeof(sps_pps_params));
-                nals_current += sizeof(sps_pps_params);
-            }
+        if (is_idr) {
+            memcpy(nals_current, sps_pps_params, sizeof(sps_pps_params));
+            nals_current += sizeof(sps_pps_params);
+        }
 
-            // begin slice nalu
-            uint8_t slice[] = {0x00, 0x00, 0x00, 0x01,
-                            (uint8_t) ((slice_header >> 24) & 0xff),
-                            (uint8_t) ((slice_header >> 16) & 0xff),
-                            (uint8_t) ((slice_header >> 8) & 0xff),
-                            (uint8_t) (slice_header & 0xff)
-            };
-            memcpy(nals_current, slice, sizeof(slice));
-            nals_current += sizeof(slice);
+        // begin slice nalu
+        uint8_t slice[] = {0x00, 0x00, 0x00, 0x01,
+                        (uint8_t) ((slice_header >> 24) & 0xff),
+                        (uint8_t) ((slice_header >> 16) & 0xff),
+                        (uint8_t) ((slice_header >> 8) & 0xff),
+                        (uint8_t) (slice_header & 0xff)
+        };
+        memcpy(nals_current, slice, sizeof(slice));
+        nals_current += sizeof(slice);
 
-            // Frame
-            memcpy(nals_current, video_packet, 2);
-            nals_current += 2;
+        // Frame
+        memcpy(nals_current, video_packet, 2);
+        nals_current += 2;
 
-            // Escape codes
-            for (int byte = 2; byte < video_packet_size; ++byte) {
-                if (video_packet[byte] <= 3 && *(nals_current - 2) == 0 && *(nals_current - 1) == 0) {
-                    *nals_current = 3;
-                    nals_current++;
-                }
-                *nals_current = video_packet[byte];
+        // Escape codes
+        for (int byte = 2; byte < video_packet_size; ++byte) {
+            if (video_packet[byte] <= 3 && *(nals_current - 2) == 0 && *(nals_current - 1) == 0) {
+                *nals_current = 3;
                 nals_current++;
             }
-
-            event_handler(context, VANILLA_EVENT_VIDEO, nals, (nals_current - nals));
-
-            free(nals);
-        } else {
-            // We didn't receive the complete frame so we'll skip it here
+            *nals_current = video_packet[byte];
+            nals_current++;
         }
+
+        event_handler(context, VANILLA_EVENT_VIDEO, nals, (nals_current - nals));
+
+        free(nals);
     }
 }
 
@@ -169,6 +176,9 @@ void *listen_video(void *x)
     struct gamepad_thread_context *info = (struct gamepad_thread_context *) x;
     unsigned char data[2048];
     ssize_t size;
+
+    // Send IDR because we'll need it
+    send_idr_request_to_console(info->socket_msg);
 
     pthread_mutex_init(&video_mutex, NULL);
 
