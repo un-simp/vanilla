@@ -24,7 +24,7 @@ VideoDecoder::VideoDecoder(QObject *parent) : QObject(parent)
     m_packet = av_packet_alloc();
     m_frame = av_frame_alloc();
     
-    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    const AVCodec *codec = avcodec_find_decoder_by_name("h264"); // prevent using libopenh264
     m_codecCtx = avcodec_alloc_context3(codec);
     avcodec_open2(m_codecCtx, codec, NULL);
 
