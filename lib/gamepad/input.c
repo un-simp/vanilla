@@ -1,6 +1,5 @@
 #include "input.h"
 
-#include <arpa/inet.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -155,7 +154,7 @@ void set_battery_status(int status)
     pthread_mutex_unlock(&button_mtx);
 }
 
-void send_input(int socket_hid)
+void send_input(void *socket_hid)
 {
     InputPacket ip;
     memset(&ip, 0, sizeof(ip));
@@ -251,8 +250,6 @@ void *listen_input(void *x)
     } while (!is_interrupted());
 
     pthread_mutex_destroy(&button_mtx);
-
-    pthread_exit(NULL);
     
     return NULL;
 }

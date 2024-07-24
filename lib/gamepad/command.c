@@ -1,6 +1,5 @@
 #include "command.h"
 
-#include <arpa/inet.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -8,6 +7,7 @@
 #include <assert.h>
 
 #include "gamepad.h"
+#include "os/os.h"
 #include "status.h"
 #include "vanilla.h"
 #include "util.h"
@@ -204,7 +204,7 @@ enum MethodIDPeripheral
     METHOD_ID_PERIPHERAL_EEPROM = 0x6
 };
 
-void send_ack_packet(int skt, CmdHeader *pkt)
+void send_ack_packet(void *skt, CmdHeader *pkt)
 {
     CmdHeader ack;
     ack.packet_type = pkt->packet_type == PACKET_TYPE_REQUEST ? PACKET_TYPE_REQUEST_ACK : PACKET_TYPE_RESPONSE_ACK;
@@ -214,14 +214,14 @@ void send_ack_packet(int skt, CmdHeader *pkt)
     send_to_console(skt, &ack, sizeof(ack), PORT_CMD);
 }
 
-void send_generic_response(int skt, GenericPacket *response)
+void send_generic_response(void *skt, GenericPacket *response)
 {
     response->cmd_header.packet_type = PACKET_TYPE_RESPONSE;
 
     send_to_console(skt, response, response->cmd_header.payload_size + sizeof(CmdHeader), PORT_CMD);
 }
 
-void handle_generic_packet(int skt, GenericPacket *request)
+void handle_generic_packet(void *skt, GenericPacket *request)
 {
     GenericCmdHeader *gen_cmd = &request->generic_cmd_header;
     print_info("magic: %x, flags: %x, service ID: %u, method ID: %u", gen_cmd->magic_0x7E, gen_cmd->flags, gen_cmd->service_id, gen_cmd->method_id);
@@ -324,12 +324,12 @@ void handle_generic_packet(int skt, GenericPacket *request)
     send_generic_response(skt, &response);
 }
 
-void handle_uac_uvc_packet(int skt, UvcUacPacket *request)
+void handle_uac_uvc_packet(void *skt, UvcUacPacket *request)
 {
     print_info("uac/uvc - mic_enable: %u, mic_freq: %u, mic_mute: %u, mic_volume: %i, mic_volume2: %i", request->uac_uvc.mic_enable, request->uac_uvc.mic_freq, request->uac_uvc.mic_mute, request->uac_uvc.mic_volume, request->uac_uvc.mic_volume_2);
 }
 
-void handle_command_packet(int skt, CmdHeader *request)
+void handle_command_packet(void *skt, CmdHeader *request)
 {
     switch (request->packet_type)
     {
@@ -377,7 +377,7 @@ void *listen_command(void *x)
 
     do
     {
-        size = recv(info->socket_cmd, data, sizeof(data), 0);
+        size = os_read_from_udp_socket(info->socket_cmd, data, sizeof(data));
         if (size > 0)
         {
             if (is_stop_code(data, size))
@@ -387,8 +387,6 @@ void *listen_command(void *x)
             handle_command_packet(info->socket_cmd, header);
         }
     } while (!is_interrupted());
-
-    pthread_exit(NULL);
 
     return NULL;
 }

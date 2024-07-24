@@ -4,11 +4,10 @@ add_library(vanilla SHARED
     gamepad/gamepad.c
     gamepad/input.c
     gamepad/video.c
+    os/os_unix.c
     status.c
-    sync.c
     util.c
     vanilla.c
-    wpa.c
 )
 
 add_executable(vanilla-cli

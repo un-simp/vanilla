@@ -1,10 +1,10 @@
 #include "audio.h"
 
-#include <arpa/inet.h>
 #include <pthread.h>
 #include <stdint.h>
 
 #include "gamepad.h"
+#include "os/os.h"
 #include "vanilla.h"
 #include "util.h"
 
@@ -67,14 +67,12 @@ void *listen_audio(void *x)
     unsigned char data[2048];
     ssize_t size;
     do {
-        size = recv(info->socket_aud, data, sizeof(data), 0);
+        size = os_read_from_udp_socket(info->socket_aud, data, sizeof(data));
         if (size > 0) {
             if (is_stop_code(data, size)) break;
             handle_audio_packet(info->event_handler, info->context, data, size);
         }
     } while (!is_interrupted());
     
-    pthread_exit(NULL);
-
     return NULL;
 }

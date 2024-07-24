@@ -4,14 +4,14 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include "gamepad.h"
-#include "vanilla.h"
+#include "os/os.h"
 #include "status.h"
 #include "util.h"
+#include "vanilla.h"
 
 typedef struct
 {
@@ -39,14 +39,14 @@ void request_idr()
     pthread_mutex_unlock(&video_mutex);
 }
 
-void send_idr_request_to_console(int socket_msg)
+void send_idr_request_to_console(void *socket_msg)
 {
     // Make an IDR request to the Wii U?
     unsigned char idr_request[] = {1, 0, 0, 0}; // Undocumented
     send_to_console(socket_msg, idr_request, sizeof(idr_request), PORT_MSG);
 }
 
-void handle_video_packet(vanilla_event_handler_t event_handler, void *context, unsigned char *data, size_t size, int socket_msg)
+void handle_video_packet(vanilla_event_handler_t event_handler, void *context, unsigned char *data, size_t size, void *socket_msg)
 {
     // TODO: This is all really weird. Copied from drc-sim-c but I feel like there's probably a better way.
 
@@ -173,7 +173,7 @@ void *listen_video(void *x)
     pthread_mutex_init(&video_mutex, NULL);
 
     do {
-        size = recv(info->socket_vid, data, sizeof(data), 0);
+        size = os_read_from_udp_socket(info->socket_vid, data, sizeof(data));
         if (size > 0) {
             if (is_stop_code(data, size)) break;
             handle_video_packet(info->event_handler, info->context, data, size, info->socket_msg);
@@ -181,8 +181,6 @@ void *listen_video(void *x)
     } while (!is_interrupted());
 
     pthread_mutex_destroy(&video_mutex);
-
-    pthread_exit(NULL);
 
     return NULL;
 }

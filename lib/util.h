@@ -16,6 +16,11 @@ size_t get_home_directory(char *buf, size_t buf_size);
 size_t get_home_directory_file(const char *filename, char *buf, size_t buf_size);
 size_t get_max_path_length();
 
+uint32_t htonl(uint32_t s);
+uint16_t htons(uint16_t s);
+uint32_t ntohl(uint32_t s);
+uint16_t ntohs(uint16_t s);
+
 void clear_interrupt();
 int is_interrupted();
 void force_interrupt();

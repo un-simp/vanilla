@@ -1,8 +1,6 @@
 #include "gamepad.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
-#include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -16,9 +14,9 @@
 #include "input.h"
 #include "video.h"
 
+#include "os/os.h"
 #include "status.h"
 #include "util.h"
-#include "wpa.h"
 
 static const uint32_t STOP_CODE = 0xCAFEBABE;
 
@@ -33,49 +31,28 @@ unsigned int reverse_bits(unsigned int b, int bit_count)
     return result;
 }
 
-void send_to_console(int fd, const void *data, size_t data_size, int port)
+uint32_t get_ip_address(uint8_t octet1, uint8_t octet2, uint8_t octet3, uint8_t octet4)
 {
-    struct sockaddr_in address;
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = inet_addr("192.168.1.10");
-    address.sin_port = htons((uint16_t) (port - 100));
-    ssize_t sent = sendto(fd, data, data_size, 0, (const struct sockaddr *) &address, sizeof(address));
-    if (sent == -1) {
-        print_info("Failed to send to Wii U socket: fd - %d; port - %d", fd, port);
-    }
+    uint32_t addr = 0;
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+    addr = (octet4 << 24) | (octet3 << 16) | (octet2 << 8) | octet1;
+#else
+    addr = (octet1 << 24) | (octet2 << 16) | (octet3 << 8) | octet4;
+#endif
+    return addr;
 }
 
-int create_socket(int *socket_out, uint16_t port)
+void send_stop_code(void *from_socket, uint16_t port)
 {
-    // TODO: Limit these sockets to one interface?
-
-    struct sockaddr_in address;
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(port);
-    (*socket_out) = socket(AF_INET, SOCK_DGRAM, 0);
-    
-    //setsockopt((*socket_out), SOL_SOCKET, SO_RCVTIMEO)
-    
-    if (bind((*socket_out), (const struct sockaddr *) &address, sizeof(address)) == -1) {
-        print_info("FAILED TO BIND PORT %u: %i", port, errno);
-        return 0;
-    }
-
-    return 1;
+    os_write_to_udp_socket(from_socket, get_ip_address(127,0,0,1), port, &STOP_CODE, sizeof(STOP_CODE));
 }
 
-void send_stop_code(int from_socket, in_port_t port)
+void send_to_console(void *socket, const void *data, size_t length, int port)
 {
-    struct sockaddr_in address;
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = inet_addr("127.0.0.1");
-
-    address.sin_port = htons(port);
-    sendto(from_socket, &STOP_CODE, sizeof(STOP_CODE), 0, (struct sockaddr *)&address, sizeof(address));
+    os_write_to_udp_socket(socket, get_ip_address(127,0,0,1), port - 100, data, length);
 }
 
-int main_loop(vanilla_event_handler_t event_handler, void *context)
+int connect_as_gamepad_internal(vanilla_event_handler_t event_handler, void *context)
 {
     struct gamepad_thread_context info;
     info.event_handler = event_handler;
@@ -84,11 +61,11 @@ int main_loop(vanilla_event_handler_t event_handler, void *context)
     int ret = VANILLA_ERROR;
 
     // Open all required sockets
-    if (!create_socket(&info.socket_vid, PORT_VID)) goto exit;
-    if (!create_socket(&info.socket_msg, PORT_MSG)) goto exit_vid;
-    if (!create_socket(&info.socket_hid, PORT_HID)) goto exit_msg;
-    if (!create_socket(&info.socket_aud, PORT_AUD)) goto exit_hid;
-    if (!create_socket(&info.socket_cmd, PORT_CMD)) goto exit_aud;
+    if (!os_open_udp_socket(&info.socket_vid, PORT_VID)) goto exit;
+    if (!os_open_udp_socket(&info.socket_msg, PORT_MSG)) goto exit_vid;
+    if (!os_open_udp_socket(&info.socket_hid, PORT_HID)) goto exit_msg;
+    if (!os_open_udp_socket(&info.socket_aud, PORT_AUD)) goto exit_hid;
+    if (!os_open_udp_socket(&info.socket_cmd, PORT_CMD)) goto exit_aud;
 
     pthread_t video_thread, audio_thread, input_thread, msg_thread, cmd_thread;
 
@@ -116,80 +93,22 @@ int main_loop(vanilla_event_handler_t event_handler, void *context)
     ret = VANILLA_SUCCESS;
 
 exit_cmd:
-    close(info.socket_cmd);
+    os_close_udp_socket(info.socket_cmd);
 
 exit_aud:
-    close(info.socket_aud);
+    os_close_udp_socket(info.socket_aud);
 
 exit_hid:
-    close(info.socket_hid);
+    os_close_udp_socket(info.socket_hid);
 
 exit_msg:
-    close(info.socket_msg);
+    os_close_udp_socket(info.socket_msg);
 
 exit_vid:
-    close(info.socket_vid);
+    os_close_udp_socket(info.socket_vid);
 
 exit:
     return ret;
-}
-
-int connect_as_gamepad_internal(struct wpa_ctrl *ctrl, const char *wireless_interface, vanilla_event_handler_t event_handler, void *context)
-{
-    while (1) {
-        while (!wpa_ctrl_pending(ctrl)) {
-            sleep(2);
-            print_info("WAITING FOR CONNECTION");
-
-            if (is_interrupted()) return VANILLA_ERROR;
-        }
-
-        char buf[1024];
-        size_t actual_buf_len = sizeof(buf);
-        wpa_ctrl_recv(ctrl, buf, &actual_buf_len);
-
-        if (memcmp(buf, "<3>CTRL-EVENT-CONNECTED", 23) == 0) {
-            break;
-        }
-
-        if (is_interrupted()) return VANILLA_ERROR;
-    }
-
-    print_info("CONNECTED TO CONSOLE");
-
-    // Use DHCP on interface
-    pid_t dhclient_pid;
-    int r = call_dhcp(wireless_interface, &dhclient_pid);
-    if (r != VANILLA_SUCCESS) {
-        print_info("FAILED TO RUN DHCP ON %s", wireless_interface);
-        return r;
-    } else {
-        print_info("DHCP ESTABLISHED");
-    }
-
-    {
-        // Destroy default route that dhclient will have created
-        pid_t ip_pid;
-        const char *ip_args[] = {"ip", "route", "del", "default", "via", "192.168.1.1", "dev", wireless_interface, NULL};
-        r = start_process(ip_args, &ip_pid, NULL, NULL);
-        if (r != VANILLA_SUCCESS) {
-            print_info("FAILED TO REMOVE CONSOLE ROUTE FROM SYSTEM");
-        }
-
-        int ip_status;
-        waitpid(ip_pid, &ip_status, 0);
-
-        if (!WIFEXITED(ip_status)) {
-            print_info("FAILED TO REMOVE CONSOLE ROUTE FROM SYSTEM");
-        }
-    }
-
-    r = main_loop(event_handler, context);
-
-    int kill_ret = kill(dhclient_pid, SIGTERM);
-    print_info("killing dhclient %i: %i", dhclient_pid, kill_ret);
-
-    return r;
 }
 
 int is_stop_code(const char *data, size_t data_length)
