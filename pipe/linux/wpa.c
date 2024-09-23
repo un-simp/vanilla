@@ -24,6 +24,8 @@
 #include "vanilla.h"
 #include "wpa.h"
 
+#include "mdns.h"
+
 const char *wpa_ctrl_interface = "/var/run/wpa_supplicant_drc";
 
 pthread_mutex_t running_mutex;
@@ -608,7 +610,7 @@ void *open_relay(void *data)
             print_info("STARTED RELAYS");
             relay_ports console_to_frontend = create_ports(from_console, port, from_frontend, addr.s_addr, port + 200);
             relay_ports frontend_to_console = create_ports(from_frontend, port + 100, from_console, inet_addr("192.168.1.10"), port - 100);
-
+            // here we register mdns
             pthread_t a_thread, b_thread;
             pthread_create(&a_thread, NULL, do_relay, &console_to_frontend);
             pthread_create(&b_thread, NULL, do_relay, &frontend_to_console);

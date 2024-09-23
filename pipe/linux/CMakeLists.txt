@@ -1,7 +1,10 @@
 add_executable(vanilla-pipe
     main.c
     wpa.c
+        mdns.c
 )
+
+
 
 install(TARGETS vanilla-pipe)
 
@@ -49,11 +52,13 @@ set_target_properties(wpa_client PROPERTIES
     IMPORTED_NO_SONAME true
 )
 add_dependencies(wpa_client wpa_client_build)
-
+find_package(Avahi REQUIRED COMPONENTS client common)
 # Link our library with the client library
 target_link_libraries(vanilla-pipe PRIVATE
     wpa_client
     pthread
+        ${APP_NAME_LC}::AvahiCommon
+        ${APP_NAME_LC}::Avahi
 )
 
 # Copy files into build directory

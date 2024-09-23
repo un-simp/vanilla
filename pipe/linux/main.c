@@ -1,7 +1,9 @@
+#include <pthread.h>
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "mdns.h"
 #include "vanilla.h"
 #include "wpa.h"
 
@@ -28,7 +30,11 @@ int main(int argc, const char **argv)
 
         vanilla_sync_with_console(wireless_interface, code);
     } else if (!strcmp("-connect", mode)) {
+        pthread_t registerThread;
+        pthread_create(&registerThread, NULL, regService, NULL);
+
         vanilla_connect_to_console(wireless_interface);
+        pthread_join(registerThread, NULL);
     } else if (!strcmp("-is_synced", mode)) {
         if (vanilla_has_config()) {
             pprint("YES\n");
